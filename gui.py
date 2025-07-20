@@ -7,6 +7,10 @@ import json
 import os
 from pathlib import Path
 import re
+from gtts import gTTS
+import pygame
+import tempfile
+import requests
 
 class PDFReaderApp:
     def __init__(self, root):
@@ -22,6 +26,20 @@ class PDFReaderApp:
         self.is_reading = False
         self.search_results = []
         self.current_search_index = 0
+        self.tts_method = tk.StringVar(value="pyttsx3")  # Default to offline TTS
+        self.temp_audio_files = []  # Track temporary audio files
+        
+        # Initialize internet_available BEFORE setup_ui()
+        self.internet_available = False
+        
+        # Check internet connectivity first
+        self.check_internet_connection()
+        
+        # Initialize pygame for audio playback
+        try:
+            pygame.mixer.init()
+        except Exception as e:
+            print(f"Pygame mixer initialization error: {e}")
         
         # Settings file
         self.settings_file = "pdf_reader_settings.json"
@@ -40,7 +58,18 @@ class PDFReaderApp:
             self.tts_engine.setProperty('rate', 150)
             self.tts_engine.setProperty('volume', 1.0)
         except Exception as e:
-            print(f"TTS initialization error: {e}")
+            print(f"pyttsx3 initialization error: {e}")
+    
+    # Check internet connectivity for gTTS
+        
+
+    def check_internet_connection(self):
+        """Check if internet is available for gTTS"""
+        try:
+            requests.get("https://www.google.com", timeout=3)
+            self.internet_available = True
+        except:
+            self.internet_available = False
     
     def setup_menu(self):
         """Create menu bar"""
@@ -141,6 +170,29 @@ class PDFReaderApp:
         
         self.speed_label = ttk.Label(speech_frame, text="150")
         self.speed_label.grid(row=0, column=5)
+        
+        # TTS Method selection
+        ttk.Label(speech_frame, text="Voice:").grid(row=1, column=0, padx=(0, 5), sticky=tk.W)
+
+        tts_frame = ttk.Frame(speech_frame)
+        tts_frame.grid(row=1, column=1, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        ttk.Radiobutton(tts_frame, text="Offline (pyttsx3)", variable=self.tts_method, 
+                        value="pyttsx3").grid(row=0, column=0, padx=(0, 10))
+
+        internet_text = "Online (gTTS)" if self.internet_available else "Online (gTTS) - No Internet"
+        internet_state = tk.NORMAL if self.internet_available else tk.DISABLED
+
+        ttk.Radiobutton(tts_frame, text=internet_text, variable=self.tts_method, 
+                        value="gtts", state=internet_state).grid(row=0, column=1)
+
+        # Language selection for gTTS
+        ttk.Label(speech_frame, text="Language:").grid(row=1, column=3, padx=(20, 5), sticky=tk.W)
+        self.language_var = tk.StringVar(value="en")
+        language_combo = ttk.Combobox(speech_frame, textvariable=self.language_var, 
+                                     values=["en", "es", "fr", "de", "it", "pt", "ru", "ja", "ko", "zh"], 
+                                     width=5, state="readonly")
+        language_combo.grid(row=1, column=4, padx=(0, 10))
         
         # Text display frame
         text_frame = ttk.LabelFrame(main_frame, text="Document Content", padding="5")
@@ -369,23 +421,69 @@ class PDFReaderApp:
             messagebox.showinfo("Info", "Please select some text to read.")
     
     def _speak_text(self, text):
-        """Speak text in background thread"""
+        """Speak text using selected TTS method"""
         try:
-            if self.tts_engine and text:
-                self.tts_engine.say(text)
-                self.tts_engine.runAndWait()
+            if self.tts_method.get() == "gtts" and self.internet_available:
+                self._speak_with_gtts(text)
+            else:
+                self._speak_with_pyttsx3(text)
         except Exception as e:
             print(f"TTS error: {e}")
+            self.root.after(0, lambda: messagebox.showerror("TTS Error", f"Error during speech: {str(e)}"))
         finally:
             self.is_reading = False
             self.root.after(0, lambda: self.status_var.set("Ready"))
+
+    def _speak_with_pyttsx3(self, text):
+        """Speak using pyttsx3 (offline)"""
+        if self.tts_engine and text:
+            self.tts_engine.say(text)
+            self.tts_engine.runAndWait()
+
+    def _speak_with_gtts(self, text):
+        """Speak using gTTS (online)"""
+        if not text.strip():
+            return
+        
+        try:
+            # Update status
+            self.root.after(0, lambda: self.status_var.set("Generating speech with gTTS..."))
+            
+            # Create gTTS object
+            tts = gTTS(text=text, lang=self.language_var.get(), slow=False)
+            
+            # Create temporary file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_file.close()
+            
+            # Save audio
+            tts.save(temp_file.name)
+            self.temp_audio_files.append(temp_file.name)
+            
+            # Update status
+            self.root.after(0, lambda: self.status_var.set("Playing gTTS audio..."))
+            
+            # Play audio using pygame
+            pygame.mixer.music.load(temp_file.name)
+            pygame.mixer.music.play()
+            
+            # Wait for playback to finish
+            while pygame.mixer.music.get_busy() and self.is_reading:
+                pygame.time.wait(100)
+                
+        except Exception as e:
+            raise Exception(f"gTTS error: {str(e)}")
     
     def stop_reading(self):
         """Stop text-to-speech"""
-        if self.tts_engine and self.is_reading:
-            self.tts_engine.stop()
-            self.is_reading = False
-            self.status_var.set("Stopped reading")
+        if self.is_reading:
+            if self.tts_method.get() == "gtts":
+                pygame.mixer.music.stop()
+            elif self.tts_engine:
+                self.tts_engine.stop()
+        
+        self.is_reading = False
+        self.status_var.set("Stopped reading")
     
     def load_recent_files(self):
         """Load recent files from settings"""
@@ -446,6 +544,25 @@ class PDFReaderApp:
             self.save_recent_files()
             self.update_recent_menu()
 
+    def refresh_internet_status(self):
+        """Refresh internet connectivity status"""
+        threading.Thread(target=self._check_internet_thread, daemon=True).start()
+
+    def _check_internet_thread(self):
+        """Check internet in background thread"""
+        try:
+            requests.get("https://www.google.com", timeout=3)
+            internet_available = True
+        except:
+            internet_available = False
+        
+        self.root.after(0, lambda: self._update_internet_status(internet_available))
+
+    def _update_internet_status(self, available):
+        """Update internet status in UI"""
+        self.internet_available = available
+        # You could update the radio button text here if needed
+
 def main():
     root = tk.Tk()
     app = PDFReaderApp(root)
@@ -454,6 +571,15 @@ def main():
     def on_closing():
         if app.is_reading:
             app.stop_reading()
+    
+        # Clean up temporary audio files
+        for temp_file in app.temp_audio_files:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except:
+                pass
+    
         root.destroy()
     
     root.protocol("WM_DELETE_WINDOW", on_closing)
